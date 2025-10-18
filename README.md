@@ -144,9 +144,9 @@ See `OPTIMIZATIONS.md` for detailed analysis.
 - The algorithm fundamentally requires reading/writing data
 
 **What we optimized:**
-- ✅ Reduced memory passes (6 ops → 2 ops) via kernel fusion
-- ✅ Warp shuffles + vectorized loads for max bandwidth efficiency
-- ✅ Achieved 19% bandwidth utilization (good for AI=0.75)
+- Reduced memory passes (6 ops → 2 ops) via kernel fusion
+- Warp shuffles + vectorized loads for max bandwidth efficiency
+- Achieved 19% bandwidth utilization (good for AI=0.75)
 
 **Cannot optimize further without:**
 - Processing multiple batches with CUDA streams (19% → 40%+)
@@ -155,6 +155,3 @@ See `OPTIMIZATIONS.md` for detailed analysis.
 
 Memory-bound is correct for this workload. Peak speedup achieved through memory reduction, not more compute.
 
-## License
-
-MIT
