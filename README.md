@@ -34,7 +34,6 @@ Custom CUDA kernel with **kernel fusion** - computes mean, std, and normalizatio
 
 ![Roofline Plot](roofline.png)
 
-Our kernel is **memory bound** (arithmetic intensity = 0.75 FLOPs/byte), achieving **67-101% memory bandwidth utilization**. This confirms kernel fusion is the critical optimization - reducing memory traffic from 6 operations (PyTorch) to 2 (our kernel).
 
 ## Quick Start
 
