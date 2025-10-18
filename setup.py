@@ -35,6 +35,7 @@ setup(
             [
                 'src/normalize_cuda.cpp',
                 'src/normalize_cuda_kernel.cu',
+                'src/normalize_cuda_kernel_optimized.cu',
             ],
             extra_compile_args={
                 'cxx': ['-O3'],

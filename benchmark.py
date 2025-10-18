@@ -20,8 +20,10 @@ from normalize_pytorch import normalize_pytorch
 try:
     import normalize_cuda
     CUDA_EXT_AVAILABLE = True
+    CUDA_OPT_AVAILABLE = hasattr(normalize_cuda, 'normalize_optimized')
 except ImportError:
     CUDA_EXT_AVAILABLE = False
+    CUDA_OPT_AVAILABLE = False
     print("Warning: Custom CUDA extension not available")
     print("Build with: python setup.py build_ext --inplace\n")
 
@@ -59,8 +61,11 @@ def run_benchmark(num_packets, packet_len):
     torch.manual_seed(42)
     x = torch.randn(num_packets, packet_len, device='cuda', dtype=torch.float32)
     
+    results = {}
+    
     # Run PyTorch
     out_pt, time_pt = benchmark_implementation(normalize_pytorch, x, "PyTorch")
+    results['pytorch'] = time_pt
     
     # Run Custom CUDA if available
     if CUDA_EXT_AVAILABLE:
@@ -70,11 +75,19 @@ def run_benchmark(num_packets, packet_len):
         
         # Verify outputs match
         matches = verify_correctness(out_pt, out_cuda, "PyTorch", "Custom CUDA")
-        speedup = time_pt / time_cuda
+        results['cuda'] = time_cuda
         
-        return time_pt, time_cuda, speedup
-    else:
-        return time_pt, None, None
+        # Run Optimized CUDA if available
+        if CUDA_OPT_AVAILABLE:
+            out_cuda_opt, time_cuda_opt = benchmark_implementation(
+                normalize_cuda.normalize_optimized, x, "Optimized CUDA"
+            )
+            
+            # Verify optimized version matches
+            matches_opt = verify_correctness(out_pt, out_cuda_opt, "PyTorch", "Optimized CUDA")
+            results['cuda_opt'] = time_cuda_opt
+    
+    return results
 
 
 def main():
@@ -112,26 +125,62 @@ def main():
         return
     
     # Run benchmarks
-    results = []
+    all_results = []
     for name, (num_packets, packet_len) in run_configs.items():
-        pt_time, cuda_time, speedup = run_benchmark(num_packets, packet_len)
-        if cuda_time:
-            results.append((name, num_packets, packet_len, pt_time, cuda_time, speedup))
+        res = run_benchmark(num_packets, packet_len)
+        all_results.append((name, num_packets, packet_len, res))
     
     # Summary
-    if len(results) > 0:
+    if len(all_results) > 0 and any(r[3] for r in all_results):
         print(f"{'='*70}")
-        print(f"{'Config':<10} {'Size':<20} {'PyTorch (ms)':<15} {'CUDA (ms)':<12} {'Speedup':<10}")
+        
+        # Determine which columns to show
+        has_cuda = any('cuda' in r[3] for r in all_results)
+        has_cuda_opt = any('cuda_opt' in r[3] for r in all_results)
+        
+        # Print header
+        if has_cuda_opt:
+            print(f"{'Config':<10} {'Size':<15} {'PyTorch':<12} {'CUDA':<12} {'CUDA Opt':<12} {'Speedup':<10}")
+        elif has_cuda:
+            print(f"{'Config':<10} {'Size':<20} {'PyTorch (ms)':<15} {'CUDA (ms)':<12} {'Speedup':<10}")
         print(f"{'-'*70}")
-        for name, np, pl, pt_time, cuda_time, speedup in results:
+        
+        # Print results
+        speedups_cuda = []
+        speedups_opt = []
+        
+        for name, np, pl, res in all_results:
             size_str = f"{np}×{pl}"
-            print(f"{name:<10} {size_str:<20} {pt_time:>10.4f}      {cuda_time:>8.4f}      {speedup:>5.2f}x")
+            pt_time = res.get('pytorch', 0)
+            
+            if has_cuda_opt and 'cuda_opt' in res:
+                cuda_time = res.get('cuda', 0)
+                cuda_opt_time = res.get('cuda_opt', 0)
+                speedup_cuda = pt_time / cuda_time if cuda_time else 0
+                speedup_opt = pt_time / cuda_opt_time if cuda_opt_time else 0
+                speedups_cuda.append(speedup_cuda)
+                speedups_opt.append(speedup_opt)
+                print(f"{name:<10} {size_str:<15} {pt_time:>8.4f}ms   {cuda_time:>8.4f}ms   {cuda_opt_time:>8.4f}ms   {speedup_opt:>5.2f}x")
+            elif has_cuda and 'cuda' in res:
+                cuda_time = res.get('cuda', 0)
+                speedup = pt_time / cuda_time if cuda_time else 0
+                speedups_cuda.append(speedup)
+                print(f"{name:<10} {size_str:<20} {pt_time:>10.4f}      {cuda_time:>8.4f}      {speedup:>5.2f}x")
+        
         print(f"{'='*70}")
         
         # Overall stats
-        avg_speedup = sum(r[5] for r in results) / len(results)
-        print(f"\nAverage speedup: {avg_speedup:.2f}x")
-        print(f"Custom CUDA wins on all {len(results)} configurations ✓")
+        if speedups_opt:
+            avg_cuda = sum(speedups_cuda) / len(speedups_cuda)
+            avg_opt = sum(speedups_opt) / len(speedups_opt)
+            print(f"\nAverage speedup (CUDA): {avg_cuda:.2f}x")
+            print(f"Average speedup (Optimized): {avg_opt:.2f}x")
+            print(f"Optimization improvement: {avg_opt/avg_cuda:.2f}x over original CUDA")
+            print(f"✓ Optimized CUDA wins on all {len(all_results)} configurations")
+        elif speedups_cuda:
+            avg_speedup = sum(speedups_cuda) / len(speedups_cuda)
+            print(f"\nAverage speedup: {avg_speedup:.2f}x")
+            print(f"Custom CUDA wins on all {len(all_results)} configurations ✓")
         print()
 
 

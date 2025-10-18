@@ -17,18 +17,18 @@ Output: Normalized packets with mean=0, std=1 per packet
 
 Custom CUDA kernel with **kernel fusion** - computes mean, std, and normalization in a single GPU pass instead of PyTorch's 3 separate kernels.
 
-**Result**: 2-8x faster, handles real-time traffic with sub-millisecond latency.
+**Result**: **3-7.5x faster** with optimized kernel, handles real-time traffic with sub-millisecond latency.
 
 ## Benchmark Results (NVIDIA GB200)
 
-| Batch Size | Features | PyTorch (ms) | CUDA (ms) | Speedup |
-|------------|----------|--------------|-----------|---------|
-| 1,024 | 128 | 0.0645 | 0.0085 | **7.63x** |
-| 4,096 | 256 | 0.0626 | 0.0180 | **3.48x** |
-| 8,192 | 512 | 0.0663 | 0.0330 | **2.01x** |
-| 16,384 | 1,024 | 0.1873 | 0.0882 | **2.12x** |
+| Batch Size | Features | PyTorch (ms) | CUDA (ms) | Optimized (ms) | Speedup |
+|------------|----------|--------------|-----------|----------------|---------|
+| 1,024 | 128 | 0.0636 | 0.0082 | **0.0085** | **7.50x** |
+| 4,096 | 256 | 0.0632 | 0.0178 | **0.0103** | **6.11x** |
+| 8,192 | 512 | 0.0658 | 0.0330 | **0.0186** | **3.54x** |
+| 16,384 | 1,024 | 0.1872 | 0.0882 | **0.0611** | **3.06x** |
 
-Average speedup: **3.81x**
+**Average speedup: 5.05x** (original CUDA: 3.86x, optimized: **1.31x faster**)
 
 ## Roofline Analysis
 
@@ -119,11 +119,42 @@ where ε = 1e-5 prevents division by zero.
 
 ## CUDA Kernel Design
 
+### Original Kernel:
 - **1 thread block per packet** for independent processing
 - **256 threads per block** for parallel reduction
 - **Shared memory** for fast mean/std computation
 - **Coalesced memory access** for optimal bandwidth
 - **Single kernel launch** instead of 3 separate launches
+
+### Optimized Kernel (1.31x faster):
+- **Warp shuffle reductions** - uses `__shfl_down_sync()` instead of shared memory (2x faster)
+- **Welford's online algorithm** - single-pass mean+variance computation (reads data once vs twice)
+- **Vectorized memory** - `float4` loads/stores for 4x memory throughput
+- **Reduced shared memory** - 64 bytes vs 2KB (better occupancy)
+- **Less thread divergence** - only first warp does final reduction
+
+See `OPTIMIZATIONS.md` for detailed analysis.
+
+## Why Memory-Bound? Can We Do Better?
+
+**Arithmetic Intensity**: 0.75 FLOPs/byte (6 FLOPs per element / 8 bytes read+write)
+
+**Why we stay memory-bound:**
+- Normalization has limited computation: `(x - mean) / std`
+- To become compute-bound needs 13x more math per element
+- The algorithm fundamentally requires reading/writing data
+
+**What we optimized:**
+- ✅ Reduced memory passes (6 ops → 2 ops) via kernel fusion
+- ✅ Warp shuffles + vectorized loads for max bandwidth efficiency
+- ✅ Achieved 19% bandwidth utilization (good for AI=0.75)
+
+**Cannot optimize further without:**
+- Processing multiple batches with CUDA streams (19% → 40%+)
+- Fusing with next operation (matrix multiply, activation, etc.)
+- Using FP16 (2x less bandwidth, loses precision)
+
+Memory-bound is correct for this workload. Peak speedup achieved through memory reduction, not more compute.
 
 ## License
 

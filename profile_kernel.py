@@ -26,13 +26,14 @@ from normalize_pytorch import normalize_pytorch
 try:
     import normalize_cuda
     CUDA_EXT_AVAILABLE = True
+    CUDA_OPT_AVAILABLE = hasattr(normalize_cuda, 'normalize_optimized')
 except ImportError:
     print("Error: Custom CUDA extension not built")
     print("Build with: python setup.py build_ext --inplace")
     sys.exit(1)
 
 
-def analyze_kernel(num_packets, packet_len, iterations=1000):
+def analyze_kernel(num_packets, packet_len, kernel_func, iterations=1000):
     """Analyze kernel performance for given configuration."""
     
     # Generate test data
@@ -41,7 +42,7 @@ def analyze_kernel(num_packets, packet_len, iterations=1000):
     
     # Warmup
     for _ in range(10):
-        _ = normalize_cuda.normalize(x)
+        _ = kernel_func(x)
     torch.cuda.synchronize()
     
     # Timing
@@ -50,7 +51,7 @@ def analyze_kernel(num_packets, packet_len, iterations=1000):
     
     start.record()
     for _ in range(iterations):
-        out = normalize_cuda.normalize(x)
+        out = kernel_func(x)
     end.record()
     torch.cuda.synchronize()
     
@@ -153,20 +154,31 @@ def get_gpu_specs():
     }
 
 
-def plot_roofline(results, gpu_specs, save_path='roofline.png'):
-    """Generate roofline plot."""
+def plot_roofline(results_original, results_optimized, gpu_specs, save_path='roofline.png'):
+    """Generate roofline plot with both original and optimized kernels."""
     
     fig, ax = plt.subplots(figsize=(12, 8))
     
-    # Extract data points
-    intensities = []
-    performances = []
-    labels = []
+    # Extract data points for original kernel
+    intensities_orig = []
+    performances_orig = []
+    labels_orig = []
     
-    for name, res in results.items():
-        intensities.append(res['arithmetic_intensity'])
-        performances.append(res['gflops'])
-        labels.append(name)
+    for name, res in results_original.items():
+        intensities_orig.append(res['arithmetic_intensity'])
+        performances_orig.append(res['gflops'])
+        labels_orig.append(name)
+    
+    # Extract data points for optimized kernel (if available)
+    intensities_opt = []
+    performances_opt = []
+    labels_opt = []
+    
+    if results_optimized:
+        for name, res in results_optimized.items():
+            intensities_opt.append(res['arithmetic_intensity'])
+            performances_opt.append(res['gflops'])
+            labels_opt.append(name)
     
     # Roofline model boundaries
     peak_bw = gpu_specs['peak_bandwidth_gbs']
@@ -190,17 +202,30 @@ def plot_roofline(results, gpu_specs, save_path='roofline.png'):
     ax.loglog(ai_range, memory_roof, 'k--', linewidth=1, alpha=0.5, label=f'Memory Bound ({peak_bw:.0f} GB/s)', zorder=1)
     ax.axhline(y=peak_flops, color='k', linestyle='--', linewidth=1, alpha=0.5, label=f'Compute Bound ({peak_flops:.0f} GFLOPS)', zorder=1)
     
-    # Plot actual kernel performance
-    colors = ['red', 'orange', 'green', 'blue']
-    for i, (ai, perf, label) in enumerate(zip(intensities, performances, labels)):
-        ax.loglog(ai, perf, 'o', markersize=12, color=colors[i], 
-                 label=f'{label}: {perf:.1f} GFLOPS', zorder=3)
+    # Plot original kernel performance
+    colors_orig = ['red', 'orange', 'brown', 'purple']
+    for i, (ai, perf, label) in enumerate(zip(intensities_orig, performances_orig, labels_orig)):
+        ax.loglog(ai, perf, 'o', markersize=12, color=colors_orig[i], 
+                 label=f'{label} (Original): {perf:.1f} GFLOPS', zorder=3)
         
         # Add annotation
         ax.annotate(f'{perf:.1f} GFLOPS\n({ai:.2f} FLOPs/byte)', 
-                   xy=(ai, perf), xytext=(10, 10),
-                   textcoords='offset points', fontsize=9,
-                   bbox=dict(boxstyle='round,pad=0.5', fc=colors[i], alpha=0.3))
+                   xy=(ai, perf), xytext=(10, -20),
+                   textcoords='offset points', fontsize=8,
+                   bbox=dict(boxstyle='round,pad=0.3', fc=colors_orig[i], alpha=0.3))
+    
+    # Plot optimized kernel performance (if available)
+    if intensities_opt:
+        colors_opt = ['darkred', 'darkorange', 'darkgreen', 'darkblue']
+        for i, (ai, perf, label) in enumerate(zip(intensities_opt, performances_opt, labels_opt)):
+            ax.loglog(ai, perf, '^', markersize=12, color=colors_opt[i], 
+                     label=f'{label} (Optimized): {perf:.1f} GFLOPS', zorder=4)
+            
+            # Add annotation
+            ax.annotate(f'{perf:.1f} GFLOPS\n({ai:.2f} FLOPs/byte)', 
+                       xy=(ai, perf), xytext=(10, 15),
+                       textcoords='offset points', fontsize=8,
+                       bbox=dict(boxstyle='round,pad=0.3', fc=colors_opt[i], alpha=0.3))
     
     # Fill regions
     ax.fill_between(ai_range, 0.1, memory_roof, where=(memory_roof < compute_roof), 
@@ -222,13 +247,24 @@ def plot_roofline(results, gpu_specs, save_path='roofline.png'):
     ax.set_ylim(0.1, peak_flops * 2)
     
     # Add text box with insights
-    insight_text = (
-        "Kernel Analysis:\n"
-        f"• AI = {intensities[0]:.2f} FLOPs/byte (MEMORY BOUND)\n"
-        f"• All points below memory roof\n"
-        f"• Limited by DRAM bandwidth\n"
-        f"• Optimization: Reduce memory traffic ✓"
-    )
+    if intensities_opt:
+        avg_improvement = sum(performances_opt) / sum(performances_orig)
+        insight_text = (
+            "Kernel Analysis:\n"
+            f"• AI = {intensities_orig[0]:.2f} FLOPs/byte (MEMORY BOUND)\n"
+            f"• ○ Original kernel (circles)\n"
+            f"• △ Optimized kernel (triangles)\n"
+            f"• Optimized: {avg_improvement:.2f}x faster on average\n"
+            f"• Key: Warp shuffles + Welford + Float4"
+        )
+    else:
+        insight_text = (
+            "Kernel Analysis:\n"
+            f"• AI = {intensities_orig[0]:.2f} FLOPs/byte (MEMORY BOUND)\n"
+            f"• All points below memory roof\n"
+            f"• Limited by DRAM bandwidth\n"
+            f"• Optimization: Reduce memory traffic ✓"
+        )
     ax.text(0.98, 0.05, insight_text, transform=ax.transAxes,
            fontsize=10, verticalalignment='bottom', horizontalalignment='right',
            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
@@ -314,7 +350,7 @@ def main():
         print("Error: CUDA not available")
         return
     
-    print("\nProfiling Custom CUDA Normalization Kernel...")
+    print("\nProfiling Custom CUDA Normalization Kernels...")
     print("Running 1000 iterations per configuration...\n")
     
     # Get GPU specs
@@ -328,19 +364,36 @@ def main():
         'XLarge (16K×1024)': (16384, 1024),
     }
     
-    results = {}
+    # Profile original kernel
+    print("Original Kernel:")
+    results_original = {}
     for name, (num_packets, packet_len) in configs.items():
-        print(f"Profiling {name}...", end=' ', flush=True)
-        results[name] = analyze_kernel(num_packets, packet_len)
+        print(f"  Profiling {name}...", end=' ', flush=True)
+        results_original[name] = analyze_kernel(num_packets, packet_len, normalize_cuda.normalize)
         print("✓")
+    
+    # Profile optimized kernel (if available)
+    results_optimized = {}
+    if CUDA_OPT_AVAILABLE:
+        print("\nOptimized Kernel:")
+        for name, (num_packets, packet_len) in configs.items():
+            print(f"  Profiling {name}...", end=' ', flush=True)
+            results_optimized[name] = analyze_kernel(num_packets, packet_len, normalize_cuda.normalize_optimized)
+            print("✓")
     
     # Print analysis
     print()
-    print_roofline_analysis(results, gpu_specs)
+    print_roofline_analysis(results_original, gpu_specs)
     
-    # Generate roofline plot
+    if results_optimized:
+        print("\n" + "="*70)
+        print("OPTIMIZED KERNEL ANALYSIS")
+        print("="*70)
+        print_roofline_analysis(results_optimized, gpu_specs)
+    
+    # Generate roofline plot with both kernels
     print()
-    plot_roofline(results, gpu_specs, save_path='roofline.png')
+    plot_roofline(results_original, results_optimized, gpu_specs, save_path='roofline.png')
     print()
 
 
